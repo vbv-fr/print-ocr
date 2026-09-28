@@ -430,6 +430,9 @@ h1,h2,h3,p{margin:0}
 .img-count.ok{color:#15803d}
 .xy{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--gray-700)}
 .xy .inp{width:80px}
+.row-del{width:30px;height:30px;display:grid;place-items:center;border-radius:5px;color:var(--gray-500);margin:0 auto}
+.row-del:hover{background:#fee2e2;color:#ef4444}
+.row-del svg{width:16px;height:16px}
 .kbd-tbl{width:100%;border-collapse:collapse;font-size:13px}
 .kbd-tbl td{padding:6px 4px;border-bottom:1px solid var(--gray-100)}
 .kbd-tbl kbd{display:inline-block;border:1px solid var(--gray-300);border-bottom-width:2px;border-radius:4px;padding:0 6px;font:12px ui-monospace,Menlo,monospace;background:var(--gray-50);margin-right:2px}
@@ -601,14 +604,51 @@ document.addEventListener('click', closeAllSelects);
 /* =====================================================================
    Shared in-memory config — Vision writes, Edge reads.
    ===================================================================== */
+// Image filters — the same list on Vision and Edge (image-enhancement techniques of the reference read tool).
+const K = 'kernel';
 const FILTERS = [
   { id: 'none', name: 'None' },
-  { id: 'grayscale', name: 'Grayscale' },
   { id: 'binarize', name: 'Binarize' },
-  { id: 'blur', name: 'Low-pass / Blur' },
+  { id: 'bothat', name: 'Bot Hat', p: K },
+  { id: 'clip', name: 'Clip', p: 'clip' },
+  { id: 'close', name: 'Close', p: K },
+  { id: 'dilate', name: 'Dilate', p: K },
+  { id: 'edgemag', name: 'Edge Magnitude' },
+  { id: 'equalize', name: 'Equalize' },
+  { id: 'erode', name: 'Erode', p: K },
+  { id: 'filldark', name: 'Fill Dark Holes' },
+  { id: 'filllight', name: 'Fill Light Holes' },
+  { id: 'gradfull', name: 'Gradient Full' },
+  { id: 'gradh', name: 'Gradient Horizontal' },
+  { id: 'gradv', name: 'Gradient Vertical' },
+  { id: 'greydist', name: 'Greyscale Distance', p: 'grey' },
+  { id: 'highpass', name: 'High Pass', p: K },
   { id: 'invert', name: 'Invert' },
-  { id: 'contrast', name: 'Contrast' },
+  { id: 'localmedian', name: 'Local Median', p: K },
+  { id: 'localmediannorm', name: 'Local Median Normalization', p: K },
+  { id: 'lowpass', name: 'Low Pass', p: K },
+  { id: 'maxhat', name: 'Max (Top Hat/Bottom Hat)', p: K },
+  { id: 'open', name: 'Open', p: K },
+  { id: 'opticaldensity', name: 'Optical Density' },
+  { id: 'sharpen', name: 'Sharpen', p: K },
+  { id: 'stretch', name: 'Stretch' },
+  { id: 'thresholdrange', name: 'Threshold Range', p: 'range' },
+  { id: 'tophat', name: 'Top Hat', p: K },
 ];
+// Settings per filter family (set on Edge). Binarize picks its threshold automatically.
+const FILTER_PARAMS = {
+  kernel: [{ k: 'rows', label: 'Rows', min: 1, max: 15, step: 2, def: 5 }, { k: 'cols', label: 'Columns', min: 1, max: 15, step: 2, def: 5 }],
+  clip: [{ k: 'low', label: 'Low', min: 0, max: 255, step: 1, def: 40 }, { k: 'high', label: 'High', min: 0, max: 255, step: 1, def: 200 }],
+  range: [{ k: 'low', label: 'Low', min: 0, max: 255, step: 1, def: 0 }, { k: 'high', label: 'High', min: 0, max: 255, step: 1, def: 110 }],
+  grey: [{ k: 'grey', label: 'Grey level', min: 0, max: 255, step: 1, def: 128 }],
+};
+const filterDef = (id) => FILTERS.find((f) => f.id === id) || FILTERS[0];
+function filterParams(F, id) {
+  const def = FILTER_PARAMS[filterDef(id).p];
+  if (!def) return null;
+  F.params[id] ||= Object.fromEntries(def.map((d) => [d.k, d.def]));
+  return F.params[id];
+}
 const filterName = (id) => (FILTERS.find((f) => f.id === id) || FILTERS[0]).name;
 
 function freshStore() {
@@ -632,11 +672,12 @@ function freshStore() {
 function blankEdge() {
   return {
     // What the running model was set up with. No images yet = only the Vision master image; replaced after each changeover.
-    active: { images: [], roi: null, changedAt: null },   // images: [{ src, name, annotations:[{ id, gtId, char, x, y, w, h }] }]
+    active: { images: [], roi: null, changedAt: null },   // images: [{ src, name, annotations:[{ id, char, x, y, w, h }] }]
     readingMode: null,   // null = Vision value; Edge can flip it
     gtRules: {},         // gtId -> { type:'text'|'regex'|'both', text, fielding:{ type, acceptable, linesOn, lines, patterns } }
     thresholds: { detection: '0.70', recognition: '0.70' },
-    filter: { type: null, params: { blur: { kernel: 5 }, contrast: { amount: 150 } } },  // type null = Vision default
+    filter: { type: null, params: {} },  // type null = Vision default; params[filterId] = settings
+    labels: null,        // null = the Vision labels; a changeover can add / remove labels
     changeover: null,    // { startedAt, durationMs, pending:{...} } while a changeover runs
   };
 }
@@ -899,7 +940,7 @@ function renderStepSetup(body) {
     <div class="sec">
       <label class="lbl" style="font-size:14px;font-weight:500">Image filter</label>
       <div id="vf-filter"></div>
-      ${['blur', 'contrast'].includes(d.filter) ? '<div class="hint">Filter strength is set on Frinks Edge</div>' : ''}
+      ${filterDef(d.filter).p ? '<div class="hint">Filter settings are set on Frinks Edge</div>' : ''}
     </div>`;
   const nameInp = $('#vf-name');
   nameInp.addEventListener('input', () => {
@@ -1018,10 +1059,17 @@ const eUI = {
 
 const effFilterType = (f = store.edge.filter) => f.type ?? store.vision.filter.type;
 const effMode = () => store.edge.readingMode ?? store.vision.readingMode;
+// Labels on Edge start as the Vision labels; a changeover can add or remove labels.
+function edgeLabels() { return store.edge.labels ?? store.vision.gts.map((g) => ({ id: g.id, label: g.label })); }
+function labelErrors(L) {
+  const out = {}, seen = {};
+  L.forEach((g) => { const k = g.label.trim().toLowerCase(); if (!k) out[g.id] = 'Label name is required'; else if (seen[k]) out[g.id] = 'Each label needs a different name'; else seen[k] = 1; });
+  return out;
+}
 function edgeReady() { return store.vision.configured && store.vision.module; }
 function coRunning() { return !!store.edge.changeover; }
 function markDirty() { eUI.dirty = true; const b = $('#e-save'); if (b) b.disabled = coRunning(); const r = $('#e-reset'); if (r) r.disabled = coRunning(); }
-function edgeSnapshot() { const E = store.edge; return clone({ gtRules: E.gtRules, thresholds: E.thresholds, filter: E.filter, readingMode: E.readingMode }); }
+function edgeSnapshot() { const E = store.edge; return clone({ gtRules: E.gtRules, thresholds: E.thresholds, filter: E.filter, readingMode: E.readingMode, labels: E.labels }); }
 function edgeOnVisionChange() { if (store.tab === 'edge') renderEdge(); }
 
 function loadImg(src, cb) {
@@ -1036,40 +1084,98 @@ function cropInto(dst, img, roi) {
   dst.width = sa.w; dst.height = sa.h;
   dst.getContext('2d').drawImage(img, roi.x, roi.y, sa.w, sa.h, 0, 0, sa.w, sa.h);
 }
-function boxBlur(src, w, h, k) {
-  const r = (k - 1) >> 1, tmp = new Float32Array(src.length), out = new Uint8ClampedArray(src.length);
-  for (let y = 0; y < h; y++) for (let c = 0; c < 3; c++) {
-    let acc = 0;
-    for (let x = -r; x <= r; x++) acc += src[(y * w + clamp(x, 0, w - 1)) * 4 + c];
-    for (let x = 0; x < w; x++) { tmp[(y * w + x) * 4 + c] = acc / k; acc += src[(y * w + clamp(x + r + 1, 0, w - 1)) * 4 + c] - src[(y * w + clamp(x - r, 0, w - 1)) * 4 + c]; }
-  }
-  for (let x = 0; x < w; x++) for (let c = 0; c < 3; c++) {
-    let acc = 0;
-    for (let y = -r; y <= r; y++) acc += tmp[(clamp(y, 0, h - 1) * w + x) * 4 + c];
-    for (let y = 0; y < h; y++) { out[(y * w + x) * 4 + c] = acc / k; acc += tmp[(clamp(y + r + 1, 0, h - 1) * w + x) * 4 + c] - tmp[(clamp(y - r, 0, h - 1) * w + x) * 4 + c]; }
-  }
-  for (let i = 3; i < src.length; i += 4) out[i] = 255;
-  return out;
-}
-// Binarize has no user threshold: it is picked automatically per image (Otsu).
-function otsu(lum) {
-  const hist = new Array(256).fill(0); lum.forEach((v) => hist[v | 0]++);
-  const total = lum.length; let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+/* ---------- Image filters — run for real (8-bit greyscale) on the ROI so the preview is honest ---------- */
+function otsu(g) {
+  const hist = new Array(256).fill(0); g.forEach((v) => hist[clamp(v | 0, 0, 255)]++);
+  const total = g.length; let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
   let sumB = 0, wB = 0, best = 0, t = 128;
   for (let i = 0; i < 256; i++) { wB += hist[i]; if (!wB) continue; const wF = total - wB; if (!wF) break; sumB += i * hist[i]; const mB = sumB / wB, mF = (sum - sumB) / wF, v = wB * wF * (mB - mF) ** 2; if (v > best) { best = v; t = i; } }
   return t;
 }
+// 1-D window pass (min / max / mean / median); two passes = rectangular Rows x Columns kernel.
+function win1d(src, w, h, r, horiz, op) {
+  const out = new Float32Array(src.length), buf = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let acc = op === 'min' ? Infinity : op === 'max' ? -Infinity : 0; buf.length = 0;
+    for (let k = -r; k <= r; k++) {
+      const v = horiz ? src[y * w + clamp(x + k, 0, w - 1)] : src[clamp(y + k, 0, h - 1) * w + x];
+      if (op === 'min') { if (v < acc) acc = v; } else if (op === 'max') { if (v > acc) acc = v; } else if (op === 'mean') acc += v; else buf.push(v);
+    }
+    out[y * w + x] = op === 'mean' ? acc / (2 * r + 1) : op === 'median' ? buf.sort((a, b) => a - b)[r] : acc;
+  }
+  return out;
+}
+const win2d = (g, w, h, P, op) => win1d(win1d(g, w, h, (P.cols - 1) >> 1, true, op), w, h, (P.rows - 1) >> 1, false, op);
+function sobel(g, w, h) {
+  const gx = new Float32Array(g.length), gy = new Float32Array(g.length), at = (x, y) => g[clamp(y, 0, h - 1) * w + clamp(x, 0, w - 1)];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    gx[y * w + x] = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+    gy[y * w + x] = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+  }
+  return [gx, gy];
+}
+// Fill dark holes = morphological reconstruction by erosion seeded from the image border.
+function fillDark(g, w, h) {
+  const m = new Float32Array(g.length).fill(255);
+  for (let x = 0; x < w; x++) { m[x] = g[x]; m[(h - 1) * w + x] = g[(h - 1) * w + x]; }
+  for (let y = 0; y < h; y++) { m[y * w] = g[y * w]; m[y * w + w - 1] = g[y * w + w - 1]; }
+  for (let it = 0; it < 80; it++) {
+    let ch = false;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x, v = Math.max(g[i], Math.min(m[i], m[i - 1], m[i - w])); if (v !== m[i]) { m[i] = v; ch = true; } }
+    for (let y = h - 2; y > 0; y--) for (let x = w - 2; x > 0; x--) { const i = y * w + x, v = Math.max(g[i], Math.min(m[i], m[i + 1], m[i + w])); if (v !== m[i]) { m[i] = v; ch = true; } }
+    if (!ch) break;
+  }
+  return m;
+}
+function applyGreyFilter(g, w, h, type, P) {
+  const map = (f) => g.map(f), n = g.length;
+  const open = () => win2d(win2d(g, w, h, P, 'min'), w, h, P, 'max');
+  const close = () => win2d(win2d(g, w, h, P, 'max'), w, h, P, 'min');
+  switch (type) {
+    case 'binarize': { const t = otsu(g); return map((v) => (v > t ? 255 : 0)); }
+    case 'dilate': return win2d(g, w, h, P, 'max');
+    case 'erode': return win2d(g, w, h, P, 'min');
+    case 'open': return open();
+    case 'close': return close();
+    case 'tophat': { const o = open(); return map((v, i) => v - o[i]); }
+    case 'bothat': { const c = close(); return map((v, i) => c[i] - v); }
+    case 'maxhat': { const o = open(), c = close(); return map((v, i) => Math.max(v - o[i], c[i] - v)); }
+    case 'lowpass': return win2d(g, w, h, P, 'mean');
+    case 'highpass': { const lp = win2d(g, w, h, P, 'mean'); return map((v, i) => v - lp[i] + 128); }
+    case 'sharpen': { const lp = win2d(g, w, h, P, 'mean'); return map((v, i) => v + (v - lp[i])); }
+    case 'localmedian': return win2d(g, w, h, P, 'median');
+    case 'localmediannorm': { const md = win2d(g, w, h, P, 'median'); return map((v, i) => v - md[i] + 128); }
+    case 'clip': return map((v) => clamp(v, P.low, P.high));
+    case 'thresholdrange': return map((v) => (v >= P.low && v <= P.high ? 255 : 0));
+    case 'greydist': return map((v) => Math.abs(v - P.grey));
+    case 'invert': return map((v) => 255 - v);
+    case 'opticaldensity': return map((v) => (255 * -Math.log10((v + 1) / 256)) / Math.log10(256));
+    case 'equalize': {
+      const hist = new Array(256).fill(0); g.forEach((v) => hist[v | 0]++);
+      const cdf = []; let c = 0; for (let i = 0; i < 256; i++) { c += hist[i]; cdf[i] = c; }
+      const c0 = cdf.find((v) => v > 0); return map((v) => ((cdf[v | 0] - c0) / Math.max(1, n - c0)) * 255);
+    }
+    case 'stretch': { const s2 = Array.from(g).sort((a, b) => a - b), lo = s2[Math.floor(n * 0.01)], hi = s2[Math.floor(n * 0.99)]; return map((v) => ((v - lo) / Math.max(1, hi - lo)) * 255); }
+    case 'gradh': { const [gx] = sobel(g, w, h); return gx.map((v) => Math.abs(v) / 4); }
+    case 'gradv': { const [, gy] = sobel(g, w, h); return gy.map((v) => Math.abs(v) / 4); }
+    case 'gradfull': { const [gx, gy] = sobel(g, w, h); return gx.map((v, i) => Math.hypot(v, gy[i]) / 4); }
+    case 'edgemag': { const [gx, gy] = sobel(g, w, h); return gx.map((v, i) => Math.hypot(v, gy[i]) / 2); }
+    case 'filldark': return fillDark(g, w, h);
+    case 'filllight': { const f = fillDark(map((v) => 255 - v), w, h); return f.map((v) => 255 - v); }
+    default: return g;
+  }
+}
 function filterInto(src, dst, type, P) {
   dst.width = src.width; dst.height = src.height;
   if (!src.width) return;
-  const id = src.getContext('2d').getImageData(0, 0, src.width, src.height), d = id.data, n = d.length;
-  const luma = (i) => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-  if (type === 'grayscale') for (let i = 0; i < n; i += 4) { const v = luma(i); d[i] = d[i + 1] = d[i + 2] = v; }
-  if (type === 'binarize') { const lum = new Float32Array(n / 4); for (let i = 0; i < n; i += 4) lum[i / 4] = luma(i); const t = otsu(lum); for (let i = 0; i < n; i += 4) { const v = lum[i / 4] > t ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; } }
-  if (type === 'invert') for (let i = 0; i < n; i += 4) { d[i] = 255 - d[i]; d[i + 1] = 255 - d[i + 1]; d[i + 2] = 255 - d[i + 2]; }
-  if (type === 'contrast') { const f = P.contrast.amount / 100; for (let i = 0; i < n; i += 4) for (let c = 0; c < 3; c++) d[i + c] = (d[i + c] - 128) * f + 128; }
-  if (type === 'blur' && P.blur.kernel > 1) d.set(boxBlur(d, src.width, src.height, P.blur.kernel));
-  dst.getContext('2d').putImageData(id, 0, 0);
+  const ctx = dst.getContext('2d');
+  if (!type || type === 'none') { ctx.drawImage(src, 0, 0); return; }
+  const id = src.getContext('2d').getImageData(0, 0, src.width, src.height), d = id.data, n = d.length / 4;
+  const g = new Float32Array(n);
+  for (let i = 0; i < n; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  const out = applyGreyFilter(g, src.width, src.height, type, P || {});
+  for (let i = 0; i < n; i++) { const v = clamp(Math.round(out[i]), 0, 255); d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
+  ctx.putImageData(id, 0, 0);
 }
 function fitCanvas(cv) {
   const r = cv.parentElement.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
@@ -1112,7 +1218,7 @@ function renderEdge() {
     sec.innerHTML = `<div class="lock-msg">No Print-OCR module is ready for this capture yet. Add it on <b>Frinks Vision</b> and click <b>Finish</b>, then come back here.</div>`;
     renderFooter(); return;
   }
-  V.gts.forEach((g) => ruleFor(g));
+  edgeLabels().forEach((g) => ruleFor(g));
   if (!eUI.saved) eUI.saved = edgeSnapshot();
   if (co) renderWizard(sec); else renderMain(sec);
   renderFooter();
@@ -1192,8 +1298,9 @@ function renderErrors(errs) {
 /* ---------- GT rules (Matching Type + Ground Truth) ---------- */
 function newFielding() { return { type: 'variable', acceptable: 'any', linesOn: false, lines: 1, patterns: [] }; }
 function ruleFor(g, rules = store.edge.gtRules) {
-  // First time Edge sees a label, it starts from the Vision values.
-  if (!rules[g.id]) rules[g.id] = { type: g.type || 'text', text: g.text || '', fielding: clone(g.fielding || newFielding()) };
+  // First time Edge sees a label, it starts from the Vision values (new labels added on Edge start empty).
+  const vg = store.vision.gts.find((x) => x.id === g.id) || {};
+  if (!rules[g.id]) rules[g.id] = { type: vg.type || 'text', text: vg.text || '', fielding: clone(vg.fielding || newFielding()) };
   return rules[g.id];
 }
 function evalFielding(f, read) {
@@ -1240,50 +1347,56 @@ function fieldingSummary(f) {
 }
 
 /* Labels table — OCRSection.jsx:74-121. Read & Match: Label Name | Matching Type | Ground Truth; Read Only: Label Name.
-   opts.checks: { gtId: [{ image, read }] } adds a Check column (changeover step 4). */
+   opts.editable (changeover step 4): label names are editable, rows can be added / removed. */
 function renderGtTable(host, rules, opts = {}) {
-  const V = store.vision, match = opts.mode === 'match', withCheck = match && !!opts.checks;
-  const heads = match ? ['Label Name', 'Matching Type', 'Ground Truth'].concat(withCheck ? ['Check'] : []) : ['Label Name'];
-  host.innerHTML = `<table class="tbl gt-main"><thead><tr>${heads.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>
-    ${V.gts.length ? V.gts.map((g, i) => {
+  const L = opts.labels || edgeLabels(), match = opts.mode === 'match', ed = !!opts.editable;
+  const heads = (match ? ['Label Name', 'Matching Type', 'Ground Truth'] : ['Label Name']).concat(ed ? [''] : []);
+  const changed = () => { opts.onChange && opts.onChange(); };
+  host.innerHTML = `<table class="tbl gt-main"><thead><tr>${heads.map((h) => `<th${h ? '' : ' style="width:60px"'}>${h}</th>`).join('')}</tr></thead><tbody>
+    ${L.length ? L.map((g, i) => {
       const r = ruleFor(g, rules);
-      const txt = `<input type="text" class="gt-in ${r.text.trim() ? '' : 'err'}" value="${esc(r.text)}" placeholder="Enter the GT text">`;
+      const txt = `<input type="text" class="gt-in gt-txt ${r.text.trim() ? '' : 'err'}" value="${esc(r.text)}" placeholder="Enter the GT text">`;
       const rx = `<div class="rx-box"><span class="rx-sum">${esc(fieldingSummary(r.fielding))}</span><button class="mini rx-edit">${ICON.pencil}Configure regex</button></div>`;
+      const lbl = ed ? `<div style="display:flex;align-items:center;gap:6px"><span class="gt-sw" style="background:${gtColor(i)};margin:0"></span><input type="text" class="gt-in lbl-in" value="${esc(g.label)}" placeholder="Enter label name"></div>`
+        : `<div class="lbl-ro"><span class="gt-sw" style="background:${gtColor(i)}"></span>${esc(g.label)}</div>`;
       return `<tr data-id="${g.id}">
-        <td style="width:${match ? '24%' : 'auto'}"><div style="display:flex;flex-direction:column;width:100%"><div class="lbl-ro"><span class="gt-sw" style="background:${gtColor(i)}"></span>${esc(g.label)}</div><span class="cell-err"></span></div></td>
+        <td style="width:${match ? '24%' : 'auto'}"><div style="display:flex;flex-direction:column;width:100%">${lbl}<span class="cell-err lbl-err"></span></div></td>
         ${match ? `<td style="width:18%"><div style="display:flex;flex-direction:column;width:100%"><div class="gt-type"></div><span class="cell-err"></span></div></td>
         <td style="text-align:left"><div style="display:flex;flex-direction:column;gap:6px;width:100%">${r.type !== 'regex' ? txt : ''}${r.type !== 'text' ? rx : ''}<span class="cell-err gt-err"></span></div></td>` : ''}
-        ${withCheck ? `<td style="width:24%"><div class="gt-check"></div></td>` : ''}
+        ${ed ? `<td><button class="row-del" title="Remove label">${ICON.trash}</button></td>` : ''}
       </tr>`;
-    }).join('') : `<tr><td colspan="${heads.length}" style="color:#6b7280;font-size:13px">No OCR labels configured.</td></tr>`}</tbody></table>`;
-  if (!match) return;
+    }).join('') : `<tr><td colspan="${heads.length}" style="color:#6b7280;font-size:13px">No OCR labels configured.</td></tr>`}</tbody></table>
+    ${ed ? `<div style="margin-top:10px"><button class="btn btn-md btn-border gt-add">+ Add label</button></div>` : ''}`;
   const refresh = () => {
+    const le = ed ? labelErrors(L) : {};
     $$('tr[data-id]', host).forEach((tr) => {
-      const g = V.gts.find((x) => x.id === tr.dataset.id), r = ruleFor(g, rules), probs = ruleProblems(r);
-      $('.gt-err', tr).textContent = probs[0] || '';
-      const inp = $('.gt-in', tr); if (inp) inp.classList.toggle('err', !r.text.trim());
-      if (withCheck) {
-        const list = opts.checks[g.id] || [];
-        const res = list.map((c) => ({ ...c, e: evalRule(r, c.read) }));
-        const bad = res.filter((c) => !c.e.ok), tip = res.map((c) => `Image ${c.image}: ${c.read || '—'} — ${c.e.msg}`).join('\n');
-        $('.gt-check', tr).innerHTML = !list.length ? '<span class="badge none">No boxes</span>' :
-          `<div style="display:flex;flex-direction:column;align-items:center;gap:3px" title="${esc(tip)}">
-            <span class="badge ${bad.length ? 'bad' : 'ok'}">${bad.length ? `✕ ${res.length - bad.length} / ${res.length} images match` : `✓ ${res.length} / ${res.length} images match`}</span>
-            ${bad.length ? `<span style="font-size:11px;color:#b91c1c">Image ${bad[0].image}: ${esc(bad[0].e.msg)}</span>` : `<span class="mono" style="font-size:12px">${esc(res[0].read)}</span>`}</div>`;
+      const g = L.find((x) => x.id === tr.dataset.id), r = ruleFor(g, rules);
+      if (ed) { $('.lbl-err', tr).textContent = le[g.id] || ''; $('.lbl-in', tr).classList.toggle('err', !!le[g.id]); }
+      if (match) {
+        $('.gt-err', tr).textContent = ruleProblems(r)[0] || '';
+        const inp = $('.gt-txt', tr); if (inp) inp.classList.toggle('err', !r.text.trim());
       }
     });
   };
-  $$('tr[data-id]', host).forEach((tr) => {
-    const g = V.gts.find((x) => x.id === tr.dataset.id), r = ruleFor(g, rules);
+  if (ed) {
+    $('.gt-add', host).onclick = () => { L.push({ id: uid(), label: '' }); changed(); renderGtTable(host, rules, opts); $$('.lbl-in', host).pop()?.focus(); };
+    $$('tr[data-id]', host).forEach((tr) => {
+      const g = L.find((x) => x.id === tr.dataset.id);
+      $('.row-del', tr).onclick = () => { L.splice(L.indexOf(g), 1); delete rules[g.id]; changed(); renderGtTable(host, rules, opts); };
+      const li = $('.lbl-in', tr); li.addEventListener('input', () => { g.label = li.value; changed(); refresh(); });
+    });
+  }
+  if (match) $$('tr[data-id]', host).forEach((tr) => {
+    const g = L.find((x) => x.id === tr.dataset.id), r = ruleFor(g, rules);
     mountSelect($('.gt-type', tr), { options: GT_TYPES, value: r.type, small: true, onChange: (o) => {
       r.type = o.id;
       if (o.id !== 'text' && r.fielding.type !== 'variable' && !r.fielding.patterns.length) r.fielding.patterns.push({ id: uid(), name: g.label, pattern: '' });
-      opts.onChange && opts.onChange(); renderGtTable(host, rules, opts);
+      changed(); renderGtTable(host, rules, opts);
     } });
-    const inp = $('.gt-in', tr);
-    if (inp) inp.addEventListener('input', () => { r.text = inp.value; opts.onChange && opts.onChange(); refresh(); });
-    const ed = $('.rx-edit', tr);
-    if (ed) ed.onclick = () => openRegexModal(g, r, () => { opts.onChange && opts.onChange(); renderGtTable(host, rules, opts); }, 'edge');
+    const inp = $('.gt-txt', tr);
+    if (inp) inp.addEventListener('input', () => { r.text = inp.value; changed(); refresh(); });
+    const edt = $('.rx-edit', tr);
+    if (edt) edt.onclick = () => openRegexModal(g, r, () => { changed(); renderGtTable(host, rules, opts); }, 'edge');
   });
   refresh();
 }
@@ -1375,15 +1488,14 @@ function renderThresholds(host, T, onChange) {
 
 /* ---------- Image filter: dropdown (+ strength for Blur / Contrast), image (left) vs preview (right) ---------- */
 function renderFilterBlock(host, F, srcCanvas, dstCanvas, onChange, srcNote) {
-  const type = effFilterType(F), P = F.params;
+  const type = effFilterType(F);
   const slider = (key, label, min, max, step, val, unit) => `
-    <div style="flex:1;min-width:260px;max-width:420px"><div class="fld-lbl">${label}</div>
+    <div style="flex:1;min-width:220px;max-width:320px"><div class="fld-lbl">${label}</div>
     <div class="slider-row"><input type="range" id="sl-${key}" min="${min}" max="${max}" step="${step}" value="${val}" style="--p:${((val - min) / (max - min)) * 100}%">
     <input class="num" id="nm-${key}" type="number" min="${min}" max="${max}" step="${step}" value="${val}"></div>
     <div class="muted" style="margin-top:2px">${unit}</div></div>`;
-  let params = '';
-  if (type === 'blur') params = slider('blur', 'Blur strength', 1, 15, 2, P.blur.kernel, 'Smoothing window in pixels (odd numbers).');
-  else if (type === 'contrast') params = slider('contrast', 'Contrast', 50, 300, 5, P.contrast.amount, 'Percent. 100 = no change.');
+  const def = FILTER_PARAMS[filterDef(type).p] || [], FP = filterParams(F, type);
+  const params = def.map((d) => slider(d.k, d.label, d.min, d.max, d.step, FP[d.k], d.k === 'rows' || d.k === 'cols' ? 'Kernel size in pixels (odd numbers).' : '0–255')).join('');
   host.innerHTML = `
     <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap">
       <div style="width:280px"><div class="fld-lbl">Filter type</div><div class="flt-sel"></div>
@@ -1397,19 +1509,18 @@ function renderFilterBlock(host, F, srcCanvas, dstCanvas, onChange, srcNote) {
     <div class="muted">${esc(srcNote)} · ${store.vision.searchArea.w} × ${store.vision.searchArea.h} px</div>`;
   mountSelect($('.flt-sel', host), { options: FILTERS, value: type, onChange: (o) => { F.type = o.id; onChange(); renderFilterBlock(host, F, srcCanvas, dstCanvas, onChange, srcNote); } });
   const draw = () => {
-    filterInto(srcCanvas, dstCanvas, effFilterType(F), P);
+    filterInto(srcCanvas, dstCanvas, type, FP);
     [[$('.pv-raw', host), srcCanvas], [$('.pv-filt', host), dstCanvas]].forEach(([cv, s]) => { cv.width = s.width; cv.height = s.height; if (s.width) cv.getContext('2d').drawImage(s, 0, 0); });
   };
-  const key = { blur: 'kernel', contrast: 'amount' }[type];
-  if (key) {
-    const sl = $('#sl-' + type, host), nm = $('#nm-' + type, host);
+  def.forEach((dd) => {
+    const sl = $('#sl-' + dd.k, host), nm = $('#nm-' + dd.k, host);
     const set = (v) => {
-      v = clamp(Number(v), +sl.min, +sl.max); if (type === 'blur' && v % 2 === 0) v += 1;
-      P[type][key] = v; sl.value = v; nm.value = v; sl.style.setProperty('--p', ((v - sl.min) / (sl.max - sl.min)) * 100 + '%');
+      v = clamp(Number(v), dd.min, dd.max); if (dd.step === 2 && v % 2 === 0) v += 1;
+      FP[dd.k] = v; sl.value = v; nm.value = v; sl.style.setProperty('--p', ((v - dd.min) / (dd.max - dd.min)) * 100 + '%');
       draw(); onChange();
     };
     sl.addEventListener('input', () => set(sl.value)); nm.addEventListener('change', () => set(nm.value));
-  }
+  });
   draw();
 }
 
@@ -1429,7 +1540,7 @@ function tickProgress() {
 function finishChangeover() {
   const E = store.edge, pd = E.changeover.pending;
   E.active = { images: pd.images, roi: pd.roi, changedAt: Date.now() };
-  E.gtRules = pd.gtRules; E.thresholds = pd.thresholds; E.filter = pd.filter; E.readingMode = pd.readingMode;
+  E.gtRules = pd.gtRules; E.thresholds = pd.thresholds; E.filter = pd.filter; E.readingMode = pd.readingMode; E.labels = pd.labels;
   E.changeover = null;
   eUI.saved = edgeSnapshot(); eUI.dirty = false; eUI.errors = [];
   console.log('[Print-OCR] Changeover complete — active config', buildConfig());
@@ -1443,56 +1554,48 @@ function openWizard() {
   const E = store.edge;
   eUI.co = {
     step: 0, errors: [], images: [], cur: 0, roi: null,
-    sel: null, activeGt: store.vision.gts[0]?.id || null, clip: null,
-    rules: clone(E.gtRules), thresholds: clone(E.thresholds), filter: clone(E.filter), readingMode: effMode(), prefilled: false,
+    sel: null, clip: null,
+    labels: clone(edgeLabels()), rules: clone(E.gtRules), thresholds: clone(E.thresholds), filter: clone(E.filter), readingMode: effMode(),
     filtCanvas: document.createElement('canvas'),
   };
   renderEdge();
   $('#e-main').scrollTo({ top: 0 });
 }
 const curImg = (co) => co.images[co.cur];
-function readsOf(im) {
-  const out = {};
-  store.vision.gts.forEach((g) => { out[g.id] = im.annotations.filter((a) => a.gtId === g.id).slice().sort((a, b) => a.x - b.x).map((a) => a.char || '?').join(''); });
-  return out;
+// Characters in reading order: group boxes into lines (top to bottom), then left to right.
+function readingOrder(A) {
+  const lines = [];
+  A.slice().sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2)).forEach((a) => {
+    const cy = a.y + a.h / 2, line = lines.find((l) => Math.abs(l.cy - cy) < Math.max(l.h, a.h) / 2);
+    if (line) line.items.push(a); else lines.push({ cy, h: a.h, items: [a] });
+  });
+  return lines.map((l) => l.items.sort((a, b) => a.x - b.x));
 }
 function overlapMap(A) {
   const m = {};
   for (let i = 0; i < A.length; i++) for (let j = i + 1; j < A.length; j++) { const a = A[i], b = A[j]; if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) { (m[a.id] ||= []).push(j + 1); (m[b.id] ||= []).push(i + 1); } }
   return m;
 }
-const gtIndex = (id) => store.vision.gts.findIndex((g) => g.id === id);
-// An image counts as annotated when every label has boxes, every box has a character + label, and nothing overlaps.
+// Changeover annotation is character-only (no labels, no GT): an image is done when it has boxes, every box has a character, and nothing overlaps.
 function imageProblems(im) {
-  const out = [], reads = readsOf(im);
+  const out = [];
   if (!im.annotations.length) return ['no character boxes yet'];
   const noChar = im.annotations.filter((a) => !a.char).length; if (noChar) out.push(`${noChar} box${noChar > 1 ? 'es have' : ' has'} no character`);
-  if (im.annotations.some((a) => gtIndex(a.gtId) < 0)) out.push('a box has no label');
   if (Object.keys(overlapMap(im.annotations)).length) out.push('boxes overlap');
-  store.vision.gts.forEach((g) => { if (!reads[g.id]) out.push(`"${g.label}" has no boxes`); });
-  return out;
-}
-function coChecks(co) {
-  const out = {};
-  store.vision.gts.forEach((g) => { out[g.id] = co.images.map((im, i) => ({ image: i + 1, read: readsOf(im)[g.id] })).filter((c) => c.read); });
   return out;
 }
 
 function wizardErrors(co) {
-  const V = store.vision, errs = [], M = V.masterImage;
-  if (co.step === 0) {
-    if (co.images.length < CO_MIN_IMAGES) errs.push(`Add at least ${CO_MIN_IMAGES} images — ${co.images.length} added so far.`);
-  }
+  const errs = [];
+  if (co.step === 0 && co.images.length < CO_MIN_IMAGES) errs.push(`Add at least ${CO_MIN_IMAGES} images — ${co.images.length} added so far.`);
   if (co.step === 2) co.images.forEach((im, i) => { const p = imageProblems(im); if (p.length) errs.push(`Image ${i + 1}: ${p.join(', ')}.`); });
   if (co.step === 3) {
-    if (co.readingMode === 'match') {
-      const checks = coChecks(co);
-      V.gts.forEach((g) => {
-        const r = ruleFor(g, co.rules), p = ruleProblems(r);
-        if (p.length) { errs.push(`"${g.label}": ${p[0]}`); return; }
-        checks[g.id].forEach((c) => { const e = evalRule(r, c.read); if (!e.ok) errs.push(`"${g.label}", image ${c.image}: the annotated characters don't match — ${e.msg}`); });
-      });
-    }
+    if (!co.labels.length) errs.push('Add atleast 1 OCR label');
+    const le = labelErrors(co.labels);
+    co.labels.forEach((g, i) => {
+      if (le[g.id]) { errs.push(`Label ${i + 1}: ${le[g.id]}`); return; }
+      if (co.readingMode === 'match') { const p = ruleProblems(ruleFor(g, co.rules)); if (p.length) errs.push(`"${g.label}": ${p[0]}`); }
+    });
     ['detection', 'recognition'].forEach((k) => { if (co.thresholds[k] === '') errs.push(`Enter the ${k} confidence threshold.`); });
   }
   return errs;
@@ -1502,12 +1605,6 @@ function wizardNext() {
   co.errors = wizardErrors(co);
   if (co.errors.length) { renderErrors(co.errors); $('#e-main').scrollTo({ top: 0, behavior: 'smooth' }); toast(co.errors[0], 'bad'); return; }
   if (co.step === 1) { co.images.forEach((im) => cropInto(im.roiCanvas, im.img, co.roi)); co.cur = 0; }
-  if (co.step === 2 && !co.prefilled) {
-    // Pre-fill GT text from image 1's annotations; the operator can change it (and the regex) on the next step.
-    const reads = readsOf(co.images[0]);
-    store.vision.gts.forEach((g) => { const r = ruleFor(g, co.rules); if (r.type !== 'regex') r.text = reads[g.id]; });
-    co.prefilled = true;
-  }
   if (co.step === CO_STEPS.length - 1) { startChangeover(); return; }
   co.step++; renderEdge(); $('#e-main').scrollTo({ top: 0 });
 }
@@ -1517,7 +1614,7 @@ function startChangeover() {
     startedAt: Date.now(), durationMs: eUI.demoSpeed ? CO_DEMO_MS : CO_REAL_MS,
     pending: {
       images: co.images.map((im) => ({ src: im.src, name: im.name, annotations: im.annotations.map((a) => ({ ...a })) })),
-      roi: { ...co.roi }, gtRules: clone(co.rules), thresholds: clone(co.thresholds), filter: clone(co.filter), readingMode: co.readingMode,
+      roi: { ...co.roi }, labels: clone(co.labels), gtRules: clone(co.rules), thresholds: clone(co.thresholds), filter: clone(co.filter), readingMode: co.readingMode,
     },
   };
   eUI.co = null;
@@ -1640,7 +1737,7 @@ function coStepRoi(body, co) {
   const setRoi = (x, y) => {
     x = clamp(Math.round(x), 0, maxX); y = clamp(Math.round(y), 0, maxY);
     if (x === co.roi.x && y === co.roi.y) return;
-    if (hadBoxes()) { co.images.forEach((x2) => { x2.annotations = []; x2.view = null; }); co.prefilled = false; toast('Character boxes were cleared because the ROI moved', 'info'); }
+    if (hadBoxes()) { co.images.forEach((x2) => { x2.annotations = []; x2.view = null; }); toast('Character boxes were cleared because the ROI moved', 'info'); }
     co.roi.x = x; co.roi.y = y;
     $('#roi-x').value = x; $('#roi-y').value = y; draw();
   };
@@ -1656,76 +1753,66 @@ function coStepRoi(body, co) {
 }
 
 /* Step 3 — character-level annotation on every image (as in Vision OCR annotation), 1-2-3 to move between images */
+const BOX_COL = '#2f6fed', BOX_FILL = 'rgba(47,111,237,.28)';   // Edge caliper blue (BeadVisualizationCanvas.jsx)
 function coStepAnnotate(body, co) {
-  const V = store.vision;
-  if (!V.gts.some((g) => g.id === co.activeGt)) co.activeGt = V.gts[0]?.id || null;
   body.innerHTML = `
     <div class="grid12">
       <div class="c4" style="display:flex;flex-direction:column;gap:16px" id="co-p3"></div>
       <div class="c8">
-        <div id="co-tabs"></div>
-        <div id="gt-chips" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0"></div>
+        <div id="co-tabs" style="margin-bottom:10px"></div>
         <div class="cv-wrap" id="cv3-wrap" tabindex="0" style="height:460px"><canvas id="cv3"></canvas></div>
       </div>
     </div>`;
   const tabs = () => {
     const prev = co.cur > 0 ? co.images[co.cur - 1] : null;
     $('#co-tabs').innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${imageTabs(co, true)}
-      ${prev ? `<button class="mini" id="co-copy" title="Copy all boxes, characters and labels from the previous image">${ICON.copy}Copy boxes from image ${co.cur}</button>` : ''}</div>`;
+      ${prev ? `<button class="mini" id="co-copy" title="Copy all boxes and characters from the previous image">${ICON.copy}Copy boxes from image ${co.cur}</button>` : ''}</div>`;
     bindImageTabs($('#co-tabs'), co, () => coStepAnnotate(body, co));
     const cp = $('#co-copy');
     if (cp) cp.onclick = () => {
-      const im = curImg(co), doCopy = () => { im.annotations = prev.annotations.map((a) => ({ ...a, id: uid() })); co.sel = null; co.prefilled = false; refresh(); toast(`Copied ${im.annotations.length} boxes — adjust them to this image`, 'info'); };
+      const im = curImg(co), doCopy = () => { im.annotations = prev.annotations.map((a) => ({ ...a, id: uid() })); co.sel = null; refresh(); toast(`Copied ${im.annotations.length} boxes — adjust them to this image`, 'info'); };
       if (im.annotations.length) warnModal('Replace boxes on this image?', `Image ${co.cur + 1} already has ${im.annotations.length} boxes. They will be replaced with the boxes from image ${co.cur}.`, 'Replace', doCopy); else doCopy();
     };
-  };
-  const chips = () => {
-    $('#gt-chips').innerHTML = `<span style="font-size:13px;color:#4b5563;font-weight:500">New boxes go to:</span>` +
-      V.gts.map((g, i) => `<button class="chip ${g.id === co.activeGt ? 'on' : ''}" data-id="${g.id}" style="background:${gtColor(i, 0.55)}">${esc(g.label)}</button>`).join('');
-    $$('#gt-chips .chip').forEach((b) => b.onclick = () => { co.activeGt = b.dataset.id; co.sel = null; chips(); panel(); cvRedraw && cvRedraw(); });
   };
   const panel = () => annoPanel(co, () => refresh());
   const recheck = () => { if (co.errors.length) { co.errors = wizardErrors(co); renderErrors(co.errors); } };
   const refresh = () => { panel(); tabs(); cvRedraw && cvRedraw(); recheck(); };
-  co._panel = () => { panel(); tabs(); }; co._chips = chips; co._goto = (i) => { co.cur = clamp(i, 0, co.images.length - 1); co.sel = null; coStepAnnotate(body, co); $('#cv3-wrap')?.focus({ preventScroll: true }); };
-  tabs(); chips(); panel(); recheck();
+  co._panel = () => { panel(); tabs(); recheck(); };
+  co._goto = (i) => { co.cur = clamp(i, 0, co.images.length - 1); co.sel = null; coStepAnnotate(body, co); $('#cv3-wrap')?.focus({ preventScroll: true }); };
+  tabs(); panel(); recheck();
   initAnnoCanvas(co);
 }
 function annoPanel(co, refresh) {
-  const V = store.vision, host = $('#co-p3'), im = curImg(co);
+  const host = $('#co-p3'), im = curImg(co);
   if (!host) return;
-  const ov = overlapMap(im.annotations), reads = readsOf(im);
+  const ov = overlapMap(im.annotations), lines = readingOrder(im.annotations);
   host.innerHTML = `
-    <div class="panel" style="gap:10px">
-      <div style="font-size:14px;font-weight:700;color:#1f2937">Image ${co.cur + 1} reads <span style="font-weight:400;color:#6b7280;font-size:12px">· boxes left to right</span></div>
-      ${V.gts.map((g, i) => `<div style="display:flex;align-items:center;gap:8px;font-size:13px"><span class="gt-sw" style="background:${gtColor(i)};margin:0"></span><span style="flex:1">${esc(g.label)}</span>
-        ${reads[g.id] ? `<span class="mono" style="font-weight:600;letter-spacing:.06em">${esc(reads[g.id])}</span>` : '<span class="badge none">No boxes yet</span>'}</div>`).join('')}
+    <div class="panel" style="gap:8px">
+      <div style="font-size:14px;font-weight:700;color:#1f2937">Image ${co.cur + 1} <span style="font-weight:400;color:#6b7280;font-size:12px">· characters in reading order</span></div>
+      ${lines.length ? `<div class="mono" style="font-size:15px;font-weight:600;letter-spacing:.08em;line-height:1.6;word-break:break-all">${lines.map((l) => esc(l.map((a) => a.char || '?').join(''))).join('<br>')}</div>` : '<span class="badge none" style="align-self:flex-start">No characters yet</span>'}
     </div>
     <div class="box-list">
       <div class="bl-h"><span>Characters (${im.annotations.length})</span>
-        <span style="display:flex;gap:6px"><button class="mini" id="bl-sort" ${im.annotations.length > 1 ? '' : 'disabled'} title="Sort each label's boxes left to right">${ICON.sort}Sort</button><button class="mini" id="bl-kbd" title="Keyboard shortcuts">${ICON.kbd}</button></span></div>
-      <div class="rows">${im.annotations.length ? im.annotations.map((a, i) => {
-        const gi = gtIndex(a.gtId);
-        return `<div class="box-row ${a.id === co.sel ? 'sel' : ''}" data-id="${a.id}">
-          <span class="ix">${i + 1}</span><span class="gt-sw" style="background:${gi >= 0 ? gtColor(gi) : '#9ca3af'};margin:0"></span>
+        <span style="display:flex;gap:6px"><button class="mini" id="bl-sort" ${im.annotations.length > 1 ? '' : 'disabled'} title="Put boxes in reading order">${ICON.sort}Sort</button><button class="mini" id="bl-kbd" title="Keyboard shortcuts">${ICON.kbd}</button></span></div>
+      <div class="rows">${im.annotations.length ? im.annotations.map((a, i) => `<div class="box-row ${a.id === co.sel ? 'sel' : ''}" data-id="${a.id}">
+          <span class="ix">${i + 1}</span>
           <input class="ch ${a.char ? '' : 'err'}" maxlength="1" value="${esc(a.char)}" placeholder="?" title="Character in this box">
-          <select class="${gi >= 0 ? '' : 'err'}" title="Label this character belongs to">${gi < 0 ? '<option value="">Label removed on Vision</option>' : ''}${V.gts.map((g) => `<option value="${g.id}" ${g.id === a.gtId ? 'selected' : ''}>${esc(g.label)}</option>`).join('')}</select>
+          <span style="flex:1;font-size:11px;color:#9ca3af;font-family:ui-monospace,Menlo,monospace">x ${a.x}, y ${a.y} · ${a.w}×${a.h}</span>
           <button class="ic up" ${i === 0 ? 'disabled' : ''} title="Move up">${ICON.up}</button>
           <button class="ic dn" ${i === im.annotations.length - 1 ? 'disabled' : ''} title="Move down">${ICON.down}</button>
           <button class="ic del" title="Delete">${ICON.trash}</button>
-        </div>${ov[a.id] ? `<div class="warn">Overlaps box ${ov[a.id].join(', ')} — boxes must not overlap</div>` : ''}`;
-      }).join('') : `<div class="box-empty">No characters yet. Draw a box around each character on the image.</div>`}</div>
+        </div>${ov[a.id] ? `<div class="warn">Overlaps box ${ov[a.id].join(', ')} — boxes must not overlap</div>` : ''}`).join('')
+      : `<div class="box-empty">No characters yet. Draw a box around each character on the image.</div>`}</div>
     </div>`;
   $('#bl-kbd').onclick = shortcutsModal;
-  $('#bl-sort').onclick = () => { const order = V.gts.map((g) => g.id); im.annotations.sort((a, b) => (order.indexOf(a.gtId) - order.indexOf(b.gtId)) || (a.x - b.x)); refresh(); };
+  $('#bl-sort').onclick = () => { im.annotations = readingOrder(im.annotations).flat(); refresh(); };
   $$('.box-row', host).forEach((row) => {
     const id = row.dataset.id, idx = im.annotations.findIndex((a) => a.id === id), a = im.annotations[idx];
     row.addEventListener('click', (e) => { if (e.target.closest('input,select,button')) return; selectBox(co, id); });
     const ch = $('.ch', row);
     ch.addEventListener('focus', () => { if (co.sel !== id) { co.sel = id; $$('.box-row', host).forEach((r) => r.classList.toggle('sel', r.dataset.id === id)); cvRedraw && cvRedraw(); } });
-    ch.addEventListener('input', () => { a.char = ch.value.slice(-1); ch.value = a.char; co.prefilled = false; if (a.char) { co.sel = null; refresh(); $('#cv3-wrap').focus({ preventScroll: true }); } });
+    ch.addEventListener('input', () => { a.char = ch.value.slice(-1); ch.value = a.char; if (a.char) { co.sel = null; refresh(); $('#cv3-wrap').focus({ preventScroll: true }); } });
     ch.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); $('#cv3-wrap').focus({ preventScroll: true }); } });
-    $('select', row).addEventListener('change', (e) => { a.gtId = e.target.value; co.prefilled = false; refresh(); });
     $('.up', row).onclick = () => { im.annotations.splice(idx - 1, 0, im.annotations.splice(idx, 1)[0]); refresh(); };
     $('.dn', row).onclick = () => { im.annotations.splice(idx + 1, 0, im.annotations.splice(idx, 1)[0]); refresh(); };
     $('.del', row).onclick = () => deleteBox(co, id);
@@ -1733,16 +1820,14 @@ function annoPanel(co, refresh) {
 }
 function selectBox(co, id, focusChar = false) {
   co.sel = id;
-  const a = curImg(co).annotations.find((x) => x.id === id);
-  if (a && gtIndex(a.gtId) >= 0) { co.activeGt = a.gtId; co._chips && co._chips(); }
   co._panel && co._panel(); cvRedraw && cvRedraw();
   const row = id && $(`.box-row[data-id="${id}"]`);
   if (row) { row.scrollIntoView({ block: 'nearest' }); if (focusChar) $('.ch', row).focus({ preventScroll: true }); }
 }
-function deleteBox(co, id) { const im = curImg(co); im.annotations = im.annotations.filter((a) => a.id !== id); if (co.sel === id) co.sel = null; co.prefilled = false; co._panel && co._panel(); cvRedraw && cvRedraw(); }
+function deleteBox(co, id) { const im = curImg(co); im.annotations = im.annotations.filter((a) => a.id !== id); if (co.sel === id) co.sel = null; co._panel && co._panel(); cvRedraw && cvRedraw(); }
 
 function initAnnoCanvas(co) {
-  const cv = $('#cv3'), wrap = $('#cv3-wrap'), V = store.vision, sa = V.searchArea, im = curImg(co);
+  const cv = $('#cv3'), wrap = $('#cv3-wrap'), sa = store.vision.searchArea, im = curImg(co);
   wrap.insertAdjacentHTML('beforeend', `
     <div class="cv-pill" id="cv3-pill"></div>
     <div class="cv-tools">
@@ -1750,7 +1835,7 @@ function initAnnoCanvas(co) {
       <button data-a="in" title="Zoom In">${ICON.zin}</button><button data-a="out" title="Zoom Out">${ICON.zout}</button>
       <button data-a="kbd" title="Keyboard shortcuts">${ICON.kbd}</button>
     </div>
-    <div class="cv-legend">${V.gts.map((g, i) => `<span><i style="background:${gtColor(i)}"></i>${esc(g.label)}</span>`).join('')}</div>`);
+`);
   let size = fitCanvas(cv);
   const fitView = () => { const s = Math.min((size.w - 40) / sa.w, (size.h - 80) / sa.h); im.view = { s, ox: (size.w - sa.w * s) / 2, oy: (size.h - sa.h * s) / 2, fit: s }; };
   if (!im.view) fitView();
@@ -1759,9 +1844,8 @@ function initAnnoCanvas(co) {
   let mode = null, start = null, draft = null, cursor = null, hover = null;
   const pill = $('#cv3-pill');
   const setPill = () => {
-    const g = V.gts.find((x) => x.id === co.activeGt);
     pill.innerHTML = mode === 'draw' ? '<span class="dot"></span>Release to finish the box' : co.sel ? '<span class="dot"></span>Type the character in the list · Delete removes the box'
-      : `<span class="dot"></span>Image ${co.cur + 1} · draw a box around one character${g ? ` → <span style="color:#e8542b">${esc(g.label)}</span>` : ''}`;
+      : `<span class="dot"></span>Image ${co.cur + 1} · draw a box around one character`;
   };
   const A = () => im.annotations;
   const handles = (a) => { const [x, y] = V2S(a.x, a.y), w = a.w * im.view.s, h = a.h * im.view.s; return [['nw', x, y], ['ne', x + w, y], ['sw', x, y + h], ['se', x + w, y + h]]; };
@@ -1774,12 +1858,12 @@ function initAnnoCanvas(co) {
     ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1; ctx.strokeRect(v.ox - .5, v.oy - .5, sa.w * v.s + 1, sa.h * v.s + 1);
     const ov = overlapMap(A());
     A().forEach((a) => {
-      const gi = gtIndex(a.gtId), col = gi >= 0 ? gtColor(gi) : '#9ca3af';
+      const col = BOX_COL;
       const [x, y] = V2S(a.x, a.y), bw = a.w * v.s, bh = a.h * v.s;
-      if (a.id === co.sel || a.id === hover) { ctx.fillStyle = gi >= 0 ? gtColor(gi, 0.3) : 'rgba(156,163,175,.3)'; ctx.fillRect(x, y, bw, bh); }
+      if (a.id === co.sel || a.id === hover) { ctx.fillStyle = BOX_FILL; ctx.fillRect(x, y, bw, bh); }
       ctx.lineWidth = a.id === co.sel ? 3 : 2; ctx.strokeStyle = ov[a.id] ? '#ef4444' : col; ctx.strokeRect(x, y, bw, bh);
       ctx.font = `700 ${clamp(Math.round(bh * 0.28), 12, 26)}px Outfit, sans-serif`;
-      ctx.shadowColor = '#000'; ctx.shadowBlur = 3; ctx.fillStyle = a.char ? col : '#ef4444'; ctx.fillText(a.char || '?', x + 2, y - 5); ctx.shadowBlur = 0;
+      ctx.shadowColor = '#000'; ctx.shadowBlur = 3; ctx.fillStyle = a.char ? '#8fb3ff' : '#ef4444'; ctx.fillText(a.char || '?', x + 2, y - 5); ctx.shadowBlur = 0;
     });
     const s = A().find((a) => a.id === co.sel);
     if (s) handles(s).forEach(([, hx, hy]) => { ctx.fillStyle = '#fff'; ctx.strokeStyle = '#00A1FF'; ctx.lineWidth = 1; ctx.fillRect(hx - 5, hy - 5, 10, 10); ctx.strokeRect(hx - 5, hy - 5, 10, 10); });
@@ -1824,8 +1908,8 @@ function initAnnoCanvas(co) {
     if (m === 'draw') {
       const d = draft; draft = null;
       if (d && d.w * im.view.s >= 4 && d.h * im.view.s >= 4) {
-        const a = { id: uid(), gtId: co.activeGt, char: '', ...clampBox({ x: Math.round(d.x), y: Math.round(d.y), w: Math.round(d.w), h: Math.round(d.h) }) };
-        A().push(a); co.prefilled = false; selectBox(co, a.id, true); return;
+        const a = { id: uid(), char: '', ...clampBox({ x: Math.round(d.x), y: Math.round(d.y), w: Math.round(d.w), h: Math.round(d.h) }) };
+        A().push(a); selectBox(co, a.id, true); return;
       }
       draw(); return;
     }
@@ -1850,7 +1934,7 @@ function initAnnoCanvas(co) {
     if (e.key === 'Escape') { if (mode === 'draw') { mode = null; draft = null; } co.sel = null; co._panel(); draw(); return; }
     if (mod && k === 'c' && sel) { e.preventDefault(); co.clip = { ...sel }; toast('Box copied', 'info'); return; }
     if (mod && k === 'v' && co.clip) { e.preventDefault(); const c = co.clip, a = { ...c, id: uid(), char: '' }; a.x = clamp(c.x + c.w + 2, 0, sa.w - c.w); A().push(a); co.clip = { ...a }; selectBox(co, a.id, true); return; }
-    if (!mod && k === 'n') { e.preventDefault(); co.sel = null; co._panel(); draw(); toast('Draw the next box — same label', 'info'); return; }
+    if (!mod && k === 'n') { e.preventDefault(); co.sel = null; co._panel(); draw(); toast('Draw the next box', 'info'); return; }
     if (!mod && (k === 'f' || k === 's')) { e.preventDefault(); co._goto(co.cur + (k === 'f' ? 1 : -1)); return; }
     if (!mod && /^[1-9]$/.test(e.key) && +e.key <= co.images.length) { e.preventDefault(); co._goto(+e.key - 1); return; }
     if (e.key === 'Enter' && sel) { e.preventDefault(); selectBox(co, sel.id, true); return; }
@@ -1870,7 +1954,7 @@ function coStepDeclare(body, co) {
       <div class="flex-col-2"><div class="tbl-title">Image Filter:</div><div id="co-flt"></div></div>
     </div>`;
   renderReadingMode($('#co-mode'), () => co.readingMode, (m) => { co.readingMode = m; coStepDeclare(body, co); });
-  renderGtTable($('#co-gt'), co.rules, { mode: co.readingMode, checks: coChecks(co), onChange: () => {} });
+  renderGtTable($('#co-gt'), co.rules, { mode: co.readingMode, labels: co.labels, editable: true, onChange: () => { if (co.errors.length) { co.errors = wizardErrors(co); renderErrors(co.errors); } } });
   renderThresholds($('#co-thr'), co.thresholds, () => {});
   renderFilterBlock($('#co-flt'), co.filter, co.images[0].roiCanvas, co.filtCanvas, () => {}, `ROI from image 1 (${co.images[0].name})`);
 }
@@ -1887,11 +1971,12 @@ function coStepStart(body, co) {
           <div class="prow"><span class="k">Images</span><span class="v ro">${co.images.length} · ${co.images.map((im) => esc(im.name)).join(', ')}</span></div>
           <div class="prow"><span class="k">ROI</span><span class="v ro">x ${co.roi.x}, y ${co.roi.y} · ${V.searchArea.w} × ${V.searchArea.h} px</span></div>
           <div class="prow"><span class="k">Characters annotated</span><span class="v ro">${total} across ${co.images.length} images</span></div>
+          <div class="prow"><span class="k">Labels</span><span class="v ro">${co.labels.length}</span></div>
           <div class="prow"><span class="k">Reading Mode</span><span class="v ro">${esc(READING_MODES.find((m) => m.id === co.readingMode).name)}</span></div>
           <div class="prow"><span class="k">Image filter</span><span class="v ro">${esc(filterName(effFilterType(co.filter)))}</span></div>
           <div class="prow"><span class="k">Confidence thresholds</span><span class="v ro">Detection ${esc(co.thresholds.detection)} · Recognition ${esc(co.thresholds.recognition)}</span></div>
           <table class="gt-tbl"><thead><tr><th>Label</th>${match ? '<th>Matching Type</th><th>Ground Truth</th>' : ''}</tr></thead><tbody>
-            ${V.gts.map((g, i) => { const r = ruleFor(g, co.rules); return `<tr><td><span class="gt-sw" style="background:${gtColor(i)}"></span>${esc(g.label)}</td>${match ? `<td>${esc(GT_TYPES.find((t) => t.id === r.type).name)}</td><td class="mono">${val(r)}</td>` : ''}</tr>`; }).join('')}
+            ${co.labels.map((g, i) => { const r = ruleFor(g, co.rules); return `<tr><td><span class="gt-sw" style="background:${gtColor(i)}"></span>${esc(g.label)}</td>${match ? `<td>${esc(GT_TYPES.find((t) => t.id === r.type).name)}</td><td class="mono">${val(r)}</td>` : ''}</tr>`; }).join('')}
           </tbody></table>
         </div>
       </div>
@@ -1907,8 +1992,7 @@ function coStepStart(body, co) {
 /* ---------- Save / Reset (main page) ---------- */
 function buildConfig() {
   const V = store.vision, E = store.edge, F = E.filter, type = effFilterType(F), mode = effMode();
-  const params = type === 'blur' ? { kernel: F.params.blur.kernel } : type === 'contrast' ? { contrast: F.params.contrast.amount / 100 } : type === 'binarize' ? { threshold: 'auto' } : {};
-  const gtLabel = (id) => V.gts.find((g) => g.id === id)?.label ?? null;
+  const params = type === 'binarize' ? { threshold: 'auto' } : { ...(filterParams(F, type) || {}) };
   const rx = (f) => f.type === 'variable' ? { fielding: 'variable', acceptableCharacters: f.acceptable, numberOfLines: f.linesOn ? f.lines : null } : { fielding: f.type, patterns: f.patterns.map((p) => ({ name: p.name, pattern: p.pattern })) };
   return {
     module: { name: V.module.name, type: 'print-ocr' },
@@ -1916,19 +2000,19 @@ function buildConfig() {
     searchArea: { w: V.searchArea.w, h: V.searchArea.h },
     roi: E.active.roi ? { ...E.active.roi } : { x: V.searchArea.x, y: V.searchArea.y },
     filter: { type, params },
-    gts: V.gts.map((g) => {
+    gts: edgeLabels().map((g) => {
       if (mode !== 'match') return { label: g.label };
       const r = ruleFor(g);
       return { label: g.label, matchingType: { text: 'text', regex: 'regex', both: 'text+regex' }[r.type], groundTruth: { text: r.type === 'regex' ? null : r.text, regex: r.type === 'text' ? null : rx(r.fielding) } };
     }),
-    annotations: E.active.images.map((im) => ({ image: im.name, boxes: im.annotations.map((a) => ({ gt: gtLabel(a.gtId), char: a.char, x: a.x, y: a.y, w: a.w, h: a.h })) })),
+    annotations: E.active.images.map((im) => ({ image: im.name, boxes: im.annotations.map((a) => ({ char: a.char, x: a.x, y: a.y, w: a.w, h: a.h })) })),
     thresholds: { detection: Number(E.thresholds.detection), recognition: Number(E.thresholds.recognition) },
     changeover: { lastCompletedAt: E.active.changedAt ? new Date(E.active.changedAt).toISOString() : null },
   };
 }
 function validateEdge() {
   const V = store.vision, E = store.edge, errs = [];
-  if (effMode() === 'match') V.gts.forEach((g) => ruleProblems(ruleFor(g)).forEach((m) => errs.push(`"${g.label}": ${m}`)));
+  if (effMode() === 'match') edgeLabels().forEach((g) => ruleProblems(ruleFor(g)).forEach((m) => errs.push(`"${g.label}": ${m}`)));
   ['detection', 'recognition'].forEach((k) => { if (E.thresholds[k] === '') errs.push(`Enter the ${k} confidence threshold.`); });
   return errs;
 }
@@ -1973,7 +2057,7 @@ function warnModal(title, body, confirmText, onConfirm) {
 function shortcutsModal() {
   const host = $('#modal-host');
   const rows = [
-    ['Draw a box', 'Click and drag on the image'], ['<kbd>Ctrl</kbd><kbd>1</kbd>', 'Rectangle tool'], ['<kbd>N</kbd>', 'Draw another box for the same label'],
+    ['Draw a box', 'Click and drag on the image'], ['<kbd>Ctrl</kbd><kbd>1</kbd>', 'Rectangle tool'], ['<kbd>N</kbd>', 'Clear selection and draw the next box'],
     ['<kbd>Delete</kbd>', 'Delete the selected box'], ['<kbd>Esc</kbd>', 'Cancel drawing / clear selection'],
     ['<kbd>Ctrl</kbd><kbd>C</kbd> · <kbd>Ctrl</kbd><kbd>V</kbd>', 'Copy box · paste it just to the right'],
     ['<kbd>F</kbd> · <kbd>S</kbd>', 'Next / previous image'], ['<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> …', 'Jump to image 1, 2, 3 …'],
